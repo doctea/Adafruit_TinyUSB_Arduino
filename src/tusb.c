@@ -244,7 +244,7 @@ bool tu_edpt_claim(tu_edpt_state_t* ep_state, osal_mutex_t mutex) {
 
 bool tu_edpt_release(tu_edpt_state_t* ep_state, osal_mutex_t mutex) {
   (void) mutex;
-  (void) osal_mutex_lock(mutex, OSAL_TIMEOUT_WAIT_FOREVER);
+  (void) osal_mutex_lock(mutex, OSAL_TIMEOUT_NORMAL);
 
   // can only release the endpoint if it is claimed and not busy
   bool const ret = (ep_state->claimed == 1) && (ep_state->busy == 0);
