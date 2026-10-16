@@ -31,6 +31,7 @@
 #include "pico/sem.h"
 #include "pico/mutex.h"
 #include "pico/critical_section.h"
+#include "osal_pico_trace.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -112,11 +113,19 @@ TU_ATTR_ALWAYS_INLINE static inline bool osal_mutex_delete(osal_mutex_t mutex_hd
 }
 
 TU_ATTR_ALWAYS_INLINE static inline bool osal_mutex_lock(osal_mutex_t mutex_hdl, uint32_t msec) {
+#if CFG_TUSB_PICO_TRACE
+  return tusb_pico_trace_mutex_lock(mutex_hdl, msec);
+#else
   return mutex_enter_timeout_ms(mutex_hdl, msec);
+#endif
 }
 
 TU_ATTR_ALWAYS_INLINE static inline bool osal_mutex_unlock(osal_mutex_t mutex_hdl) {
+#if CFG_TUSB_PICO_TRACE
+  tusb_pico_trace_mutex_unlock(mutex_hdl);
+#else
   mutex_exit(mutex_hdl);
+#endif
   return true;
 }
 

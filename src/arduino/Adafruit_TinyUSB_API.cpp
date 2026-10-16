@@ -54,6 +54,10 @@ void TinyUSB_Device_Task(void) {
 void TinyUSB_Device_FlushCDC(void) {
   uint8_t const cdc_instance = Adafruit_USBD_CDC::getInstanceCount();
   for (uint8_t instance = 0; instance < cdc_instance; instance++) {
+#if CFG_TUSB_OS == OPT_OS_PICO && CFG_TUSB_PICO_TRACE
+    tusb_pico_trace_record(TUSB_PICO_TRACE_CDC_FLUSH, NULL, instance, -1,
+                           (uintptr_t)__builtin_return_address(0));
+#endif
     tud_cdc_n_write_flush(instance);
   }
 }

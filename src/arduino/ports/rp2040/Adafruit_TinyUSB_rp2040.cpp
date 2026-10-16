@@ -83,8 +83,21 @@ static void usb_task_irq(void) {
   // in this file which will do a tud_task itself, so we'll just do nothing
   // until the next tick; we won't starve
   if (mutex_try_enter(&__usb_mutex, NULL)) {
+#if CFG_TUSB_OS == OPT_OS_PICO && CFG_TUSB_PICO_TRACE
+    tusb_pico_trace_record(TUSB_PICO_TRACE_TASK_ENTER, &__usb_mutex, 1,
+                           __usb_mutex.owner, (uintptr_t)__builtin_return_address(0));
+#endif
     tud_task();
+#if CFG_TUSB_OS == OPT_OS_PICO && CFG_TUSB_PICO_TRACE
+    tusb_pico_trace_record(TUSB_PICO_TRACE_TASK_EXIT, &__usb_mutex, 1,
+                           __usb_mutex.owner, (uintptr_t)__builtin_return_address(0));
+#endif
     mutex_exit(&__usb_mutex);
+#if CFG_TUSB_OS == OPT_OS_PICO && CFG_TUSB_PICO_TRACE
+  } else {
+    tusb_pico_trace_record(TUSB_PICO_TRACE_TASK_SKIPPED, &__usb_mutex, 1,
+                           __usb_mutex.owner, (uintptr_t)__builtin_return_address(0));
+#endif
   }
 }
 
@@ -138,8 +151,21 @@ extern "C" {
 void TinyUSB_Device_Task(void) {
   // Since tud_task() is also invoked in ISR, we need to get the mutex first
   if (mutex_try_enter(&__usb_mutex, NULL)) {
+#if CFG_TUSB_OS == OPT_OS_PICO && CFG_TUSB_PICO_TRACE
+    tusb_pico_trace_record(TUSB_PICO_TRACE_TASK_ENTER, &__usb_mutex, 0,
+                           __usb_mutex.owner, (uintptr_t)__builtin_return_address(0));
+#endif
     tud_task();
+#if CFG_TUSB_OS == OPT_OS_PICO && CFG_TUSB_PICO_TRACE
+    tusb_pico_trace_record(TUSB_PICO_TRACE_TASK_EXIT, &__usb_mutex, 0,
+                           __usb_mutex.owner, (uintptr_t)__builtin_return_address(0));
+#endif
     mutex_exit(&__usb_mutex);
+#if CFG_TUSB_OS == OPT_OS_PICO && CFG_TUSB_PICO_TRACE
+  } else {
+    tusb_pico_trace_record(TUSB_PICO_TRACE_TASK_SKIPPED, &__usb_mutex, 0,
+                           __usb_mutex.owner, (uintptr_t)__builtin_return_address(0));
+#endif
   }
 }
 }

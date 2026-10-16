@@ -232,6 +232,10 @@ void Adafruit_USBD_CDC::flush(void) {
     return;
   }
 
+#if CFG_TUSB_OS == OPT_OS_PICO && CFG_TUSB_PICO_TRACE
+  tusb_pico_trace_record(TUSB_PICO_TRACE_CDC_FLUSH, this, _instance, -1,
+                         (uintptr_t)__builtin_return_address(0));
+#endif
   tud_cdc_n_write_flush(_instance);
 }
 
@@ -242,18 +246,32 @@ size_t Adafruit_USBD_CDC::write(const uint8_t *buffer, size_t size) {
     return 0;
   }
 
+#if CFG_TUSB_OS == OPT_OS_PICO && CFG_TUSB_PICO_TRACE
+  tusb_pico_trace_record(TUSB_PICO_TRACE_CDC_WRITE, this, size, -1,
+                         (uintptr_t)__builtin_return_address(0));
+#endif
   size_t remain = size;
   while (remain && tud_cdc_n_connected(_instance)) {
     size_t wrcount = tud_cdc_n_write(_instance, buffer, remain);
     remain -= wrcount;
     buffer += wrcount;
 
+#if CFG_TUSB_OS == OPT_OS_PICO && CFG_TUSB_PICO_TRACE
+    if (wrcount) {
+      tusb_pico_trace_record(TUSB_PICO_TRACE_CDC_PROGRESS, this, remain, -1,
+                             (uintptr_t)__builtin_return_address(0));
+    }
+#endif
     // Write FIFO is full, run usb background to flush
     if (remain) {
       yield();
     }
   }
 
+#if CFG_TUSB_OS == OPT_OS_PICO && CFG_TUSB_PICO_TRACE
+  tusb_pico_trace_record(TUSB_PICO_TRACE_CDC_DONE, this, size - remain, -1,
+                         (uintptr_t)__builtin_return_address(0));
+#endif
   return size - remain;
 }
 
