@@ -151,7 +151,11 @@ uint8_t Adafruit_USBD_Device::addStringDescriptor(const char *s) {
 }
 
 void Adafruit_USBD_Device::task(void) {
+#ifdef ARDUINO_ARCH_RP2040
   TinyUSB_Device_Task();
+#else
+  tud_task();
+#endif
 
 #ifdef TINYUSB_NEED_POLLING_TASK
   // can also be used with port with built-in support
