@@ -1,8 +1,11 @@
 # RP2 USB lock tracing
 
-This is baseline instrumentation, not a deadlock fix. It preserves mutex
-timeouts, return values, task scheduling, and CDC write behavior. It does not
-enable USB debug printing or assign UART pins.
+This instrumentation was used to diagnose RP2040 TinyUSB lockups. The port now
+leaves USB hardware event capture in the DCD interrupt and runs `tud_task()`
+through the foreground `TinyUSB_Device_Task()` API instead of a software IRQ.
+This avoids running class transfer callbacks in an interrupt that can preempt
+foreground endpoint operations. It does not change mutex timeouts or CDC write
+behavior, enable USB debug printing, or assign UART pins.
 
 ## Library and build selection
 
@@ -131,7 +134,7 @@ cores. `timestamp_us` wraps approximately every 71 minutes.
 | 2 LOCK_ACQUIRED | Requested timeout | Mutex address |
 | 3 LOCK_FAILED | Requested timeout | Mutex address |
 | 4 LOCK_RELEASE | Zero; recorded before release | Mutex address |
-| 5 TASK_ENTER | 1: software IRQ; 0: port API | Global USB mutex |
+| 5 TASK_ENTER | 0: port API | Global USB mutex |
 | 6 TASK_EXIT | Same route identifier | Global USB mutex |
 | 7 TASK_SKIPPED | Same route identifier | Global USB mutex |
 | 8 CDC_WRITE | Requested byte count | CDC object |
@@ -154,10 +157,12 @@ on the same core/object. Repeated task activity with no CDC progress is
 different from a core stopped at LOCK_WAIT. Bytes accepted are not proof of
 host receipt; the host must verify transfer integrity separately.
 
-TASK events cover the RP2040 port's guarded task calls only; raw `tud_task()`
 calls are not labeled as TASK events. Endpoint and FIFO mutex calls reached
-from either route are traced. This first pass does not capture endpoint buffer
-registers, hard faults, or full call stacks in RAM.
+TASK events cover the RP2040 port's guarded task calls only. Direct raw
+`tud_task()` calls bypass this mutex and are not labeled as TASK events.
+Endpoint and FIFO mutex calls reached from the guarded route are traced. This
+first pass does not capture endpoint buffer registers, hard faults, or full
+call stacks in RAM.
 
 Recording briefly masks interrupts on the current core and restores their
 previous state. It uses no heap, USB output, or additional blocking mutexes.

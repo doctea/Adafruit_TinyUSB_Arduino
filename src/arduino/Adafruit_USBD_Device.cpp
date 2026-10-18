@@ -151,7 +151,7 @@ uint8_t Adafruit_USBD_Device::addStringDescriptor(const char *s) {
 }
 
 void Adafruit_USBD_Device::task(void) {
-  tud_task();
+  TinyUSB_Device_Task();
 
 #ifdef TINYUSB_NEED_POLLING_TASK
   // can also be used with port with built-in support

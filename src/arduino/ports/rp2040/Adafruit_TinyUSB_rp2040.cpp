@@ -31,27 +31,12 @@
 // mbed old pico-sdk need to wrap with cpp
 extern "C" {
 #include "hardware/flash.h"
-#include "hardware/irq.h"
 #include "pico/bootrom.h"
 #include "pico/mutex.h"
-#include "pico/time.h"
 }
 
 #include "arduino/Adafruit_TinyUSB_API.h"
 #include "tusb.h"
-
-// SDK >= 1.4.0 need to dynamically request the IRQ to avoid conflicts
-#if (PICO_SDK_VERSION_MAJOR * 100 + PICO_SDK_VERSION_MINOR) < 104
-#define USB_TASK_IRQ 31
-#else
-static unsigned int USB_TASK_IRQ;
-#endif
-
-//--------------------------------------------------------------------+
-// Forward USB interrupt events to TinyUSB IRQ Handler
-// rp2040 implementation will install appropriate handler when initializing
-// tinyusb. There is no need to forward IRQ from application
-//--------------------------------------------------------------------+
 
 //--------------------------------------------------------------------+
 // Earle Philhower and mbed specific
@@ -78,36 +63,6 @@ static unsigned int USB_TASK_IRQ;
 // have multiple cores updating the TUSB state in parallel
 mutex_t __usb_mutex;
 
-static void usb_task_irq(void) {
-  // if the mutex is already owned, then we are in user code
-  // in this file which will do a tud_task itself, so we'll just do nothing
-  // until the next tick; we won't starve
-  if (mutex_try_enter(&__usb_mutex, NULL)) {
-#if CFG_TUSB_OS == OPT_OS_PICO && CFG_TUSB_PICO_TRACE
-    tusb_pico_trace_record(TUSB_PICO_TRACE_TASK_ENTER, &__usb_mutex, 1,
-                           __usb_mutex.owner, (uintptr_t)__builtin_return_address(0));
-#endif
-    tud_task();
-#if CFG_TUSB_OS == OPT_OS_PICO && CFG_TUSB_PICO_TRACE
-    tusb_pico_trace_record(TUSB_PICO_TRACE_TASK_EXIT, &__usb_mutex, 1,
-                           __usb_mutex.owner, (uintptr_t)__builtin_return_address(0));
-#endif
-    mutex_exit(&__usb_mutex);
-#if CFG_TUSB_OS == OPT_OS_PICO && CFG_TUSB_PICO_TRACE
-  } else {
-    tusb_pico_trace_record(TUSB_PICO_TRACE_TASK_SKIPPED, &__usb_mutex, 1,
-                           __usb_mutex.owner, (uintptr_t)__builtin_return_address(0));
-#endif
-  }
-}
-
-#ifndef PICO_SHARED_IRQ_HANDLER_LOWEST_ORDER_PRIORITY
-#define PICO_SHARED_IRQ_HANDLER_LOWEST_ORDER_PRIORITY 0x00
-#endif
-
-// invoked when there is hardware usb irq, trigger task runner later
-static void usb_task_trigger_irq(void) { irq_set_pending(USB_TASK_IRQ); }
-
 void TinyUSB_Port_InitDevice(uint8_t rhport) {
   mutex_init(&__usb_mutex);
 
@@ -116,17 +71,6 @@ void TinyUSB_Port_InitDevice(uint8_t rhport) {
       .speed = TUSB_SPEED_FULL,
   };
   tusb_init(rhport, &rh_init);
-
-  // soft irq for task runner
-#if (PICO_SDK_VERSION_MAJOR * 100 + PICO_SDK_VERSION_MINOR) >= 104
-  USB_TASK_IRQ = user_irq_claim_unused(true);
-#endif
-  irq_set_exclusive_handler(USB_TASK_IRQ, usb_task_irq);
-  irq_set_enabled(USB_TASK_IRQ, true);
-
-  // add shared irq to trigger task runner
-  irq_add_shared_handler(USBCTRL_IRQ, usb_task_trigger_irq,
-                         PICO_SHARED_IRQ_HANDLER_LOWEST_ORDER_PRIORITY);
 }
 
 void TinyUSB_Port_EnterDFU(void) {
@@ -142,14 +86,12 @@ uint8_t TinyUSB_Port_GetSerialNumber(uint8_t serial_id[16]) {
 
 //--------------------------------------------------------------------+
 // Core API
-// Implement Core API since rp2040 need mutex for calling tud_task in
-// IRQ context
+// Serialize foreground TinyUSB task calls against calls made by the core.
 //--------------------------------------------------------------------+
 
 extern "C" {
 
 void TinyUSB_Device_Task(void) {
-  // Since tud_task() is also invoked in ISR, we need to get the mutex first
   if (mutex_try_enter(&__usb_mutex, NULL)) {
 #if CFG_TUSB_OS == OPT_OS_PICO && CFG_TUSB_PICO_TRACE
     tusb_pico_trace_record(TUSB_PICO_TRACE_TASK_ENTER, &__usb_mutex, 0,
