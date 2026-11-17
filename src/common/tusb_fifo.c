@@ -35,7 +35,7 @@
 
 TU_ATTR_ALWAYS_INLINE static inline void ff_lock(osal_mutex_t mutex) {
   if (mutex != NULL) {
-    osal_mutex_lock(mutex, OSAL_TIMEOUT_WAIT_FOREVER);
+    osal_mutex_lock(mutex, OSAL_TIMEOUT_NORMAL); // doctea again OSAL_TIMEOUT_WAIT_FOREVER);
   }
 }
 
