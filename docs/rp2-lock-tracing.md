@@ -1,8 +1,36 @@
 # RP2 USB lock tracing
 
-This is baseline instrumentation, not a deadlock fix. It preserves mutex
-timeouts, return values, task scheduling, and CDC write behavior. It does not
-enable USB debug printing or assign UART pins.
+This instrumentation was used to diagnose RP2040 TinyUSB lockups. The port now
+leaves USB hardware event capture in the DCD interrupt and runs `tud_task()`
+through the foreground `TinyUSB_Device_Task()` API instead of a software IRQ.
+This avoids running class transfer callbacks in an interrupt that can preempt
+foreground endpoint operations. It does not change mutex timeouts or CDC write
+behavior, enable USB debug printing, or assign UART pins.
+
+## Minimal runtime fix
+
+The RP2040 port no longer installs the software task IRQ or its shared USB IRQ
+trigger. The DCD hardware interrupt still captures and queues USB events.
+`TinyUSB_Device_Task()` retains its nonblocking mutex guard, including re-entry
+protection, and the public `TinyUSBDevice.task()` helper uses it on RP2040 only.
+Other MCU implementations of that helper are unchanged.
+
+Applications must service the task regularly in foreground code. Arduino-Pico
+also calls the guarded API from its core; cores without built-in support need
+explicit polling. Long blocking application work can now delay task progress;
+this service-contract change needs broader sketch/board testing before an
+upstream PR. The task mutex alone does not serialize arbitrary endpoint calls
+from application interrupts or the other core.
+
+Compulidian therefore also keeps MIDI parsing in its foreground loop and queues
+interrupt-produced outgoing notes for foreground transmission. Local gates and
+sample triggering remain immediate. Its reliable SysEx retry path also uses
+the guarded task API. The project-side queue and library-side task fix address
+different captured interrupted-owner deadlocks; neither replaces the other.
+
+Tracing is diagnostic-only and defaults to `CFG_TUSB_PICO_TRACE=0`. Keep the
+recorder and hooks for future captures; disabling them does not disable the fix.
+No mutex timeout reduction or recursive-mutex workaround is needed.
 
 ## Library and build selection
 
@@ -53,9 +81,12 @@ The matching ELF is:
 .pio/build/rpipico_16mb_usb_trace/firmware_rpipico_16mb_usb_trace.elf
 ```
 
-The current generated VS Code launch profiles still select `rpipico_16mb`.
-Select/reinitialize the trace environment before using VS Code debugging, or
-start a matching GDB session from the Compulidian directory:
+In VS Code, select a configuration whose `projectEnvName` and executable both
+match this environment, and upload that same build before attaching. A normal
+firmware image with trace-ELF symbols produces misleading stack and object
+addresses. Confirm serial `V` reports `ENV_NAME: rpipico_16mb_usb_trace` and the
+expected build time. Alternatively, start a matching GDB session from the
+Compulidian directory:
 
 ```sh
 pio debug -e rpipico_16mb_usb_trace --interface=gdb
@@ -66,13 +97,23 @@ the board. Do not restart a debug session or reset after the failure, because
 the trace is ordinary RAM and does not survive a reset. Use `continue` to run
 from the initial breakpoint.
 
-## First hardware experiment
+## Stress and failure capture
 
-Keep the existing MIDI timer, raw task calls, and timeouts unchanged for this
-baseline. Try incoming MIDI clock with CDC output first, then add outgoing
-MIDI and console input. Record the host applications and which streams are
-active. Also test a disconnected console and an open console whose host stops
-reading; these are different conditions.
+Compulidian has survived incoming Ableton MIDI clock, outgoing MIDI notes, and
+parameter streaming over CDC together, including extreme-tempo stress. This is
+evidence for the tested RP2040 setup, not a guarantee for every USB entry point
+or board. Keep the foreground MIDI polling, TX queue, and task fix enabled.
+
+Remaining release checks are the same stress with tracing disabled, repeated
+Start/Stop with note-off verification, USB disconnect/reconnect, and a console
+whose host stops reading. Disconnected and connected-but-not-reading CDC are
+different conditions; CDC writes can still block and delay foreground USB
+service. RP2350 still needs a separate build and hardware test. Slow tempo
+reacquisition under extreme clock changes is a separate clock-following issue;
+it has not been diagnosed as another USB deadlock.
+
+If another freeze occurs, record the host applications and which streams are
+active, then capture without resetting as below.
 
 Before running, optionally set GDB breakpoints on `__assert_func` and `abort`
 to catch C assertions before they disappear into an exit loop. TinyUSB's
@@ -131,7 +172,7 @@ cores. `timestamp_us` wraps approximately every 71 minutes.
 | 2 LOCK_ACQUIRED | Requested timeout | Mutex address |
 | 3 LOCK_FAILED | Requested timeout | Mutex address |
 | 4 LOCK_RELEASE | Zero; recorded before release | Mutex address |
-| 5 TASK_ENTER | 1: software IRQ; 0: port API | Global USB mutex |
+| 5 TASK_ENTER | 0: port API | Global USB mutex |
 | 6 TASK_EXIT | Same route identifier | Global USB mutex |
 | 7 TASK_SKIPPED | Same route identifier | Global USB mutex |
 | 8 CDC_WRITE | Requested byte count | CDC object |
@@ -154,10 +195,11 @@ on the same core/object. Repeated task activity with no CDC progress is
 different from a core stopped at LOCK_WAIT. Bytes accepted are not proof of
 host receipt; the host must verify transfer integrity separately.
 
-TASK events cover the RP2040 port's guarded task calls only; raw `tud_task()`
-calls are not labeled as TASK events. Endpoint and FIFO mutex calls reached
-from either route are traced. This first pass does not capture endpoint buffer
-registers, hard faults, or full call stacks in RAM.
+TASK events cover the RP2040 port's guarded task calls only. Direct raw
+`tud_task()` calls bypass this mutex and are not labeled as TASK events.
+Endpoint and FIFO mutex calls reached from the guarded route are traced. This
+first pass does not capture endpoint buffer registers, hard faults, or full
+call stacks in RAM.
 
 Recording briefly masks interrupts on the current core and restores their
 previous state. It uses no heap, USB output, or additional blocking mutexes.
@@ -168,8 +210,8 @@ build and hardware validation.
 
 ## Focused host check
 
-With Python 3 and a native C compiler (`CC` defaults to `cc`), run from this
-library repository:
+With Python 3 and native C/C++ compilers (`CC` defaults to `cc`, `CXX` to
+`c++`), run from this library repository:
 
 ```sh
 python3 tools/test_pico_trace.py
@@ -178,4 +220,7 @@ python3 tools/test_pico_trace.py
 The harness compiles the actual recorder with a fake Pico runtime and checks
 mutex result/timeout preservation, interrupt restoration and simulated nesting,
 per-core isolation, ring wraparound, retained snapshots, and freeze behavior.
-It does not replace target linking or hardware tests.
+It also compiles the actual guarded/public task function bodies with stubbed
+dependencies, checking lock contention, re-entry, task routing and polling-core
+CDC flushing for RP2040, mbed RP2040 and a generic platform, with tracing on and
+off. It does not replace target linking, USB hardware or scheduling tests.

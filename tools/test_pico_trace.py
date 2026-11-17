@@ -156,6 +156,135 @@ int main(void) {
 """
 
 
+TASK_HARNESS = r"""
+#include <assert.h>
+#include <stddef.h>
+#include "pico/mutex.h"
+#include "osal_pico_trace.h"
+
+mutex_t __usb_mutex = { -1 };
+static unsigned task_calls;
+static unsigned lock_attempts;
+static unsigned unlocks;
+static bool reenter;
+static bool expect_guarded = true;
+
+void TinyUSB_Device_Task(void);
+
+bool mutex_try_enter(mutex_t *mutex, uint32_t *) {
+  ++lock_attempts;
+  if (mutex->owner != -1) return false;
+  mutex->owner = 0;
+  return true;
+}
+
+void mutex_exit(mutex_t *mutex) {
+  assert(mutex->owner == 0);
+  mutex->owner = -1;
+  ++unlocks;
+}
+
+void tud_task(void) {
+  assert(__usb_mutex.owner == (expect_guarded ? 0 : -1));
+  ++task_calls;
+  if (reenter) {
+    reenter = false;
+    TinyUSB_Device_Task();
+  }
+}
+
+#if CFG_TUSB_PICO_TRACE
+static unsigned task_events[TUSB_PICO_TRACE_EVENT_COUNT];
+void tusb_pico_trace_record(tusb_pico_trace_event_t event, const void *object,
+                           uint32_t value, int32_t, uintptr_t) {
+  assert(object == &__usb_mutex && value == 0);
+  ++task_events[event];
+}
+#endif
+
+struct FakeSerial {
+  unsigned flushes = 0;
+  bool connected = true;
+  explicit operator bool() const { return connected; }
+  void flush() { ++flushes; }
+} SerialTinyUSB;
+
+class Adafruit_USBD_Device {
+public:
+  void task(void);
+};
+
+@PORT_TASK@
+@PUBLIC_TASK@
+
+int main(void) {
+  TinyUSB_Device_Task();
+  assert(task_calls == 1 && unlocks == 1 && __usb_mutex.owner == -1);
+  __usb_mutex.owner = 1;
+  TinyUSB_Device_Task();
+  assert(task_calls == 1 && unlocks == 1 && __usb_mutex.owner == 1);
+  __usb_mutex.owner = -1;
+  reenter = true;
+  TinyUSB_Device_Task();
+  assert(task_calls == 2 && unlocks == 2 && __usb_mutex.owner == -1);
+#if CFG_TUSB_PICO_TRACE
+  assert(task_events[TUSB_PICO_TRACE_TASK_ENTER] == 2);
+  assert(task_events[TUSB_PICO_TRACE_TASK_EXIT] == 2);
+  assert(task_events[TUSB_PICO_TRACE_TASK_SKIPPED] == 2);
+#endif
+
+  const unsigned previous_attempts = lock_attempts;
+  Adafruit_USBD_Device device;
+#ifndef ARDUINO_ARCH_RP2040
+  expect_guarded = false;
+#endif
+  device.task();
+  SerialTinyUSB.connected = false;
+  device.task();
+  assert(task_calls == 4 && __usb_mutex.owner == -1);
+#ifdef ARDUINO_ARCH_RP2040
+  assert(lock_attempts == previous_attempts + 2 && unlocks == 4);
+#else
+  assert(lock_attempts == previous_attempts && unlocks == 2);
+#endif
+#ifdef TINYUSB_NEED_POLLING_TASK
+  assert(SerialTinyUSB.flushes == 1);
+#else
+  assert(SerialTinyUSB.flushes == 0);
+#endif
+}
+"""
+
+
+def check_task_routing(source, temporary):
+    arduino = source.parent / "arduino"
+    port = (arduino / "ports/rp2040/Adafruit_TinyUSB_rp2040.cpp").read_text()
+    device = (arduino / "Adafruit_USBD_Device.cpp").read_text()
+    port_task = port[port.index("void TinyUSB_Device_Task(void) {"):port.rindex("\n}")]
+    public_task = device[device.index("void Adafruit_USBD_Device::task(void) {"):
+                         device.index("void Adafruit_USBD_Device::clearConfiguration(void) {")]
+    harness = temporary / "task.cpp"
+    harness.write_text(TASK_HARNESS.replace("@PORT_TASK@", port_task)
+                       .replace("@PUBLIC_TASK@", public_task), encoding="ascii")
+    compiler = shlex.split(os.environ.get("CXX", "c++"))
+    flags = compiler + ["-std=c++11", "-Wall", "-Wextra", "-Werror",
+                        "-I", str(temporary), "-I", str(source)]
+    executable = temporary / ("task.exe" if os.name == "nt" else "task")
+    platforms = {
+        "other": ["-DTINYUSB_NEED_POLLING_TASK"],
+        "rp2040": ["-DARDUINO_ARCH_RP2040"],
+        "mbed_rp2040": ["-DARDUINO_ARCH_RP2040", "-DARDUINO_ARCH_MBED",
+                        "-DTINYUSB_NEED_POLLING_TASK"],
+    }
+    for platform, defines in platforms.items():
+        for tracing in (0, 1):
+            subprocess.run(flags + defines + ["-DCFG_TUSB_PICO_TRACE=" + str(tracing),
+                           str(harness), "-o", str(executable)], check=True)
+            subprocess.run([str(executable)], check=True)
+            print("PASS: task locking/re-entry and public routing, " + platform
+                  + ", tracing=" + str(tracing))
+
+
 def main():
     source = Path(__file__).resolve().parents[1] / "src" / "osal"
     compiler = shlex.split(os.environ.get("CC", "cc"))
@@ -177,6 +306,7 @@ def main():
                                 str(source / "osal_pico_trace.c"),
                                 "-o", str(temporary / "disabled.o")], check=True)
         print("PASS: tracing-disabled translation unit compiles")
+        check_task_routing(source, temporary)
 
 
 if __name__ == "__main__":
